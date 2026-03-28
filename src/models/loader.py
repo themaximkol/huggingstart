@@ -1,5 +1,10 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
+import os
+from dotenv import load_dotenv
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM, BitsAndBytesConfig
+
+load_dotenv()
+token = os.getenv("HF_TOKEN")
 
 
 def load_scorer(model_name: str = "unitary/toxic-bert") -> tuple:
@@ -11,14 +16,27 @@ def load_scorer(model_name: str = "unitary/toxic-bert") -> tuple:
     return tokenizer, model
 
 
-def load_generator(model_name: str = "gpt2") -> tuple:
+def load_generator(model_name: str = "gpt2", quantize: bool = False, ) -> tuple:
     # loads model for generation, gpt2 default
     # additionally pads, so batches have the same size
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
     tokenizer.pad_token = tokenizer.eos_token  # GPT-2 specific fix
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    if quantize:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            quantization_config=get_quantization_config(),
+            device_map="auto",  # splits across GPU/CPU automatically
+            token=token,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            token=token,
+        )
+
     model.eval()
-    return tokenizer, model
+    return tokenizer, model, quantize
 
 
 def score_text(text: str, tokenizer, model) -> dict:
@@ -83,3 +101,26 @@ def generate_text(
         completions.append(text.strip())
 
     return completions
+
+
+def get_quantization_config() -> BitsAndBytesConfig:
+    """
+    4-bit NormalFloat quantization config.
+    Reduces a 7B model from ~14GB to ~4GB VRAM.
+
+    nf4 (NormalFloat4) is specifically designed for normally-distributed
+    neural network weights — more accurate than plain int4.
+
+    double_quant quantizes the quantization constants themselves,
+    saving an extra ~0.4GB on top of the main reduction.
+
+    bfloat16 for compute means internal calculations still happen
+    in 16-bit — only the stored weights are 4-bit. This preserves
+    accuracy while saving memory.
+    """
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
